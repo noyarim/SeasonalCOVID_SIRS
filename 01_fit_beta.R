@@ -1,10 +1,16 @@
 library(deSolve)
 library(reshape2)
 library(ggplot2)
+library(dplyr)
+
+
+##########################
+###### Functions #########
+##########################
 
 ## Differential equation for SIR-R model of COVID-19 ##
 ode_SIRS <- function(t, state, parameters){
-  with(as.list(c(state,parameters)),{
+  with(parameters,{
     #region = parameters$region
     InfectionParam = parameters$InfectionParam
     #VirusTransParam = parameters$VirusTransParam
@@ -12,45 +18,51 @@ ode_SIRS <- function(t, state, parameters){
     beta0 = InfectionParam[1]
     g = InfectionParam[2]
     z = InfectionParam[3]
-    # daily beta multiplier
-    w_idx = ceiling(t/7) # find week index
+    # weekly beta multiplier
+    m.beta = parameters$m.beta
+    # calculate daily beta multiplier
+    if(t ==0){
+      w_idx = 1
+    }else{
+      w_idx = floor(t/7)
+      }
+    # find week index
     m.beta.d <- m.beta[w_idx]
-    print(c(t,w_idx))
-    #print(m.beta.d)
-    m.beta.d=1
-    
+
     beta.d = beta0 * m.beta.d
     # ODE equations
-    #S=state[1]
-    #I=state[2]
-    #R=state[3]
+    S=state[1]
+    I=state[2]
+    R=state[3]
+    C=state[4]
     dS = -beta.d*S*I + z*R
     dI = beta.d*S*I - g*I
     dR = g*I - z*R
     dC = beta.d*S*I
     
     
-    list(c(dS,dI,dR,dC))
+    return(list(c(dS,dI,dR,dC)))
   })
 }
 
 ## A function to run SIR-R model of COVID-19 ##
-run_SIRS <- function(region){
+run_SIRS <- function(parameters){
   with(parameters, {
     timestep=1
     # time span
     tspan = seq(T0, T0+Tend, by=timestep) 
-    # Initial distribution by region
-    if (region == 'Green'){ # Northeast
-      # initial distribution
-      IC = c(S=1-1000/71000000,I=1000/71000000,R=0,C=0)
-      # region-specific oscillator
-    }else if(region == 'Blue'){ # South
-      IC = c(S=1-1000/67000000,I=1000/67000000,R=0,C=0)
-    }else if (region == 'Red'){ # Midwest
-      IC = c(S=1-1000/187000000,I=1000/187000000,R=0,C=0)
-    }
-  
+    # # Initial distribution by region
+    # if (region == 'Green'){ # Northeast
+    #   # initial distribution
+    #   IC = c(S=1-1000/71000000,I=1000/71000000,R=0,C=0)
+    #   # region-specific oscillator
+    # }else if(region == 'Blue'){ # South
+    #   IC = c(S=1-1000/67000000,I=1000/67000000,R=0,C=0)
+    # }else if (region == 'Red'){ # Midwest
+    #   IC = c(S=1-1000/187000000,I=1000/187000000,R=0,C=0)
+    # }
+    # Initial distribution
+    IC = c(S=1-0.0000015, I=0.0000015, R=0, C=0)
     # run ODE solver
     odetime <- proc.time()
     #prob = rk(y=IC, times=tspan, func = ode_SIRS, parms = parameters, method='rk45dp7')
@@ -67,50 +79,117 @@ cal_case <- function(prob){
 }
 
 ## A function to calculate error ##
-cal_cost <- function(region, state, parameters){
-  
-  # model outcome
-  prob <- run_SIRS(region, parameters)
-  I.m <- cal_case(prob)
-  # observed case
-  I.o <- covid_case %>% 
-    filter(state == state)
-  # sum of squared errors
-
-  cost <- sum((I.m - I.o)^2)
-  
-  return(cost)
+cal_cost <- function(m.beta, parameters, data, grouping, group){
+  with(parameters, {
+    parameters$m.beta = m.beta
+    # model outcome
+    prob <- run_SIRS(parameters)
+    I.m <- cal_case(prob)
+    # observed case 
+    this_data <- data[data[[grouping]] == group, ] 
+    temp <- data %>%
+      filter(!!sym(grouping) == group) %>%
+      group_by(date)%>%
+      summarize(
+        w.case_rate = weighted.mean(case_rate_sm, pop2020)
+      )
+    
+    I.o <- temp$w.case_rate 
+    # sum of squared errors
+    cost <- sum((I.m - I.o)^2)
+    
+    return(cost)
+  })
 }
 
-## Main ##
+## A function to run SIR with the calibrated betas ##
+run_SIRS_clbr <- function(m.beta, parameters){
+  parameters$m.beta = m.beta
+  prob = run_SIRS(parameters)
+  I.m <- cal_case(prob)
+  
+  return(list(prob,I.m))
+}
+
+
+
+#####################
+###### Data #########
+#####################
+# covid data by state
+covid_by_state <- read.csv("data/covid_by_state_cln.csv")
+# Try different grouping of states
+covid_by_state2 <- covid_by_state %>%
+  mutate(
+    # group 1: divide the states into 4: NE, MW, S, W
+    grp1 = ifelse(state_ab %in% c("VT","CT","PA","ME","MA","NH","NJ","NY","RI"),'NE',
+                  ifelse(state_ab %in% c("MN","ND","SD","IA","NE","WI","MO","IN","IL","MI","OH","KS"),'MW',
+                         ifelse(state_ab %in% c("MD","DE","WV","VA","TX","TN","SC","OK","NC","MS","LA","KY","GA","FL","AR","AL"),'S',
+                                ifelse(state_ab %in% c("ID", "MT","CO","WY","UT","NV","AZ","CA","WA","OR","NM"),'W',NA)))),
+    # group 2: divide the states into 2: N, S
+    grp2 = ifelse(grp1 == 'S', 'S', 'N' )
+  )
+
+
+############################
+###### Calibration #########
+###########################
+
 # Model set up parameters
 T0 = 0.0
-Tend = 730
+Tend = length(levels(as.factor(covid_by_state2$date)))
 n_days = as.integer(Tend-T0)
 
 # Fixed infection parameters
 beta0=0.185
 gamma= 0.16
 z = 0.005
+
 # varying parameters (weekly beta multiplier)
 m.beta = rep(1,as.integer(n_days/7))
 
-# observational data
-
-
-## Fitting daily beta by region
 # parameters to run SIRS model
-parameters = list(region = region, 
+parameters = list(
                   T0 = T0,
                   Tend = Tend,
                   n_days = n_days,
-                  InfectionParam=c(beta0,gamma,z),
-                  m.beta = m.beta)
+                  InfectionParam=c(beta0,gamma,z)
+                  )
 
-optim(m.beta,fn = cal_cost)
-# check beta.d over time
-t<-seq(0,Tend,by=1)
+# Directed search of weekly beta values by group  
+grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE')
+grp1_S<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='S')
+grp1_W<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='W')
+grp1_MW<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='MW')
 
+
+#########################
+####### Plotting ########
+#########################
+# observed case rate
+dt_grp1 <- covid_by_state2 %>%
+  group_by(grp1, date) %>%
+  summarize(w_case_rate = weighted.mean(case_rate_sm, pop2020))
+dt_grp1_t <- reshape2::dcast(dt_grp1, date~grp1, value.var = "w_case_rate")
+# modeled case rate
+case_rate_grp1_NE = run_SIRS_clbr(grp1_NE$par,parameters)[[2]]
+case_rate_grp1_S = run_SIRS_clbr(grp1_S$par,parameters)[[2]]
+case_rate_grp1_W = run_SIRS_clbr(grp1_W$par,parameters)[[2]]
+case_rate_grp1_MW = run_SIRS_clbr(grp1_MW$par,parameters)[[2]]
+# data frame for comparison
+dt_grp1_t <- dt_grp1_t %>%
+  mutate(
+    # modeled case rates
+    MW_m <- case_rate_grp1_MW,
+    NE_m <- case_rate_grp1_NE,
+    S_m <- case_rate_grp1_S,
+    W_m <- case_rate_grp1_W,
+    # estimated weekly betas
+    NE_beta <- grp1_NE$par,
+    S_beta <- grp1_S$par,
+    W_beta <- grp1_W$par,
+    MW_beta <- grp1_MW$par
+    )
 
 
 
