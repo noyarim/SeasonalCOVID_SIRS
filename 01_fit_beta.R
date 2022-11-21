@@ -24,12 +24,13 @@ ode_SIRS <- function(t, state, parameters){
     if(t ==0){
       w_idx = 1
     }else{
-      w_idx = floor(t/1)
+      w_idx = floor(t/30.5)
       }
     # find week index
     m.beta.d <- m.beta[w_idx]
 
     beta.d = beta0 * m.beta.d
+    print(c(t,w_idx,m.beta.d))
     # ODE equations
     S=state[1]
     I=state[2]
@@ -62,7 +63,7 @@ run_SIRS <- function(parameters){
     #   IC = c(S=1-1000/187000000,I=1000/187000000,R=0,C=0)
     # }
     # Initial distribution
-    IC = c(S=1-0.000015, I=0.0000015, R=0, C=0)
+    IC = c(S=1-0.0000015, I=0.0000015, R=0, C=0)
     # run ODE solver
     odetime <- proc.time()
     #prob = rk(y=IC, times=tspan, func = ode_SIRS, parms = parameters, method='rk45dp7')
@@ -75,8 +76,10 @@ run_SIRS <- function(parameters){
 ## A function to calculate the new cases ##
 cal_case <- function(prob){
   new_case <-(prob[-1,5]- prob[-nrow(prob),5])*10^5
+  new_case[1] = 0
   new_case_log <- log(new_case)
   new_case_log[is.infinite(new_case_log)] = 0
+  #print(new_case[1:10])
   return(new_case_log)
 }
 
@@ -100,10 +103,15 @@ cal_cost <- function(m.beta, parameters, data, grouping, group){
       )
     
     I.o <- temp$w.case_rate_log
+    #print(c(length(m.beta[m.beta<0]),length(I.m[is.na(I.m)]), length(I.o[is.na(I.o)])))
+    
     # sum of squared errors
     cost <- sum((I.m - I.o)^2)
-    print(c(m.beta,cost))
-
+    #print(c(m.beta,cost))
+    if (is.nan(cost)){
+      cost = 10^10
+    }
+    #print(cost)
     return(cost)
   })
 }
@@ -153,7 +161,7 @@ gamma= 0.16
 z = 0.005
 
 # varying parameters (weekly beta multiplier)
-m.beta = rep(1,as.integer(n_days/1))
+m.beta = rep(1,as.integer(n_days/30.5))
 
 # parameters to run SIRS model
 parameters = list(
@@ -166,6 +174,7 @@ parameters = list(
 # Directed search of weekly beta values by group  
 grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE', method="Nelder-Mead")
 grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE', lower=rep(0.5,length(m.beta)), upper=rep(1.5,length(m.beta)), method="L-BFGS-B")
+grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE', method="BFGS")
 
 grp1_S<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='S')
 grp1_W<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='W')
