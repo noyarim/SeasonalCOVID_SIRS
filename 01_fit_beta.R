@@ -24,7 +24,7 @@ ode_SIRS <- function(t, state, parameters){
     if(t ==0){
       w_idx = 1
     }else{
-      w_idx = floor(t/7)
+      w_idx = floor(t/1)
       }
     # find week index
     m.beta.d <- m.beta[w_idx]
@@ -62,7 +62,7 @@ run_SIRS <- function(parameters){
     #   IC = c(S=1-1000/187000000,I=1000/187000000,R=0,C=0)
     # }
     # Initial distribution
-    IC = c(S=1-0.0000015, I=0.0000015, R=0, C=0)
+    IC = c(S=1-0.000015, I=0.0000015, R=0, C=0)
     # run ODE solver
     odetime <- proc.time()
     #prob = rk(y=IC, times=tspan, func = ode_SIRS, parms = parameters, method='rk45dp7')
@@ -74,8 +74,10 @@ run_SIRS <- function(parameters){
 
 ## A function to calculate the new cases ##
 cal_case <- function(prob){
-  new_case <-prob[-1,5]- prob[-nrow(prob),5]
-  return(new_case)
+  new_case <-(prob[-1,5]- prob[-nrow(prob),5])*10^5
+  new_case_log <- log(new_case)
+  new_case_log[is.infinite(new_case_log)] = 0
+  return(new_case_log)
 }
 
 ## A function to calculate error ##
@@ -86,18 +88,22 @@ cal_cost <- function(m.beta, parameters, data, grouping, group){
     prob <- run_SIRS(parameters)
     I.m <- cal_case(prob)
     # observed case 
-    this_data <- data[data[[grouping]] == group, ] 
     temp <- data %>%
       filter(!!sym(grouping) == group) %>%
       group_by(date)%>%
       summarize(
         w.case_rate = weighted.mean(case_rate_sm, pop2020)
+      ) %>%
+      mutate(
+        w.case_rate_log = log(w.case_rate),
+        w.case_rate_log = ifelse(is.infinite(w.case_rate_log),0,w.case_rate_log)
       )
     
-    I.o <- temp$w.case_rate 
+    I.o <- temp$w.case_rate_log
     # sum of squared errors
     cost <- sum((I.m - I.o)^2)
-    
+    print(c(m.beta,cost))
+
     return(cost)
   })
 }
@@ -120,6 +126,7 @@ run_SIRS_clbr <- function(m.beta, parameters){
 covid_by_state <- read.csv("data/covid_by_state_cln.csv")
 # Try different grouping of states
 covid_by_state2 <- covid_by_state %>%
+  filter(date <= as.Date("2021-03-01"))%>%
   mutate(
     # group 1: divide the states into 4: NE, MW, S, W
     grp1 = ifelse(state_ab %in% c("VT","CT","PA","ME","MA","NH","NJ","NY","RI"),'NE',
@@ -146,7 +153,7 @@ gamma= 0.16
 z = 0.005
 
 # varying parameters (weekly beta multiplier)
-m.beta = rep(1,as.integer(n_days/7))
+m.beta = rep(1,as.integer(n_days/1))
 
 # parameters to run SIRS model
 parameters = list(
@@ -157,7 +164,9 @@ parameters = list(
                   )
 
 # Directed search of weekly beta values by group  
-grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE')
+grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE', method="Nelder-Mead")
+grp1_NE<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='NE', lower=rep(0.5,length(m.beta)), upper=rep(1.5,length(m.beta)), method="L-BFGS-B")
+
 grp1_S<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='S')
 grp1_W<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='W')
 grp1_MW<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_state2, grouping = 'grp1', group='MW')
@@ -167,30 +176,35 @@ grp1_MW<-optim(m.beta, fn = cal_cost, parameters = parameters, data=covid_by_sta
 ####### Plotting ########
 #########################
 # observed case rate
-dt_grp1 <- covid_by_state2 %>%
+dt_grp1_o <- covid_by_state2 %>%
   group_by(grp1, date) %>%
-  summarize(w_case_rate = weighted.mean(case_rate_sm, pop2020))
-dt_grp1_t <- reshape2::dcast(dt_grp1, date~grp1, value.var = "w_case_rate")
+  summarize(w_case_rate = weighted.mean(case_rate_sm, pop2020))%>%
+  mutate(type='observed')
 # modeled case rate
 case_rate_grp1_NE = run_SIRS_clbr(grp1_NE$par,parameters)[[2]]
 case_rate_grp1_S = run_SIRS_clbr(grp1_S$par,parameters)[[2]]
 case_rate_grp1_W = run_SIRS_clbr(grp1_W$par,parameters)[[2]]
 case_rate_grp1_MW = run_SIRS_clbr(grp1_MW$par,parameters)[[2]]
-# data frame for comparison
-dt_grp1_t <- dt_grp1_t %>%
-  mutate(
-    # modeled case rates
-    MW_m <- case_rate_grp1_MW,
-    NE_m <- case_rate_grp1_NE,
-    S_m <- case_rate_grp1_S,
-    W_m <- case_rate_grp1_W,
-    # estimated weekly betas
-    NE_beta <- grp1_NE$par,
-    S_beta <- grp1_S$par,
-    W_beta <- grp1_W$par,
-    MW_beta <- grp1_MW$par
-    )
-
+dt_grp1_m <- data.frame(
+  date = dt_grp1_o$date,
+  MW = case_rate_grp1_MW,
+  NE = case_rate_grp1_NE,
+  S = case_rate_grp1_S,
+  W = case_rate_grp1_W
+)
+dt_grp1_m_t <- melt(dt_grp1_m, id.vars="date")
+dt_grp1_m_t <- dt_grp1_m_t %>%
+  rename(grp1 = variable, w_case_rate=value)%>%
+  select(grp1,date,w_case_rate)%>%
+  mutate(type = 'modeled')
+dt_grp1_m_t$type = 'modeled'
+dt_grp1_all <- rbind(dt_grp1_o, dt_grp1_m_t)
+dt_grp1_all$grp1 = as.factor(dt_grp1_all$grp1)
+# Plot the observed vs. modeled case rate
+ggplot(dt_grp1_all, aes(date,w_case_rate,group=type,color=type)) +
+  geom_line()+
+  facet_wrap(~grp1)+
+  theme_bw()
 
 
 # Test run with IC = c(1,0.01,0)
