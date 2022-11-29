@@ -30,7 +30,6 @@ ode_SIRS <- function(t, state, parameters){
     m.beta.d <- m.beta[w_idx]
 
     beta.d = beta0 * m.beta.d
-    print(c(t,w_idx,m.beta.d))
     # ODE equations
     S=state[1]
     I=state[2]
@@ -62,8 +61,7 @@ run_SIRS <- function(parameters){
     # }else if (region == 'Red'){ # Midwest
     #   IC = c(S=1-1000/187000000,I=1000/187000000,R=0,C=0)
     # }
-    # Initial distribution
-    IC = c(S=1-0.000015, I=0.000015, R=0, C=0)
+
     # run ODE solver
     odetime <- proc.time()
     prob = rk(y=IC, times=tspan, func = ode_SIRS, parms = parameters, method='rk45dp7')
@@ -73,18 +71,29 @@ run_SIRS <- function(parameters){
   })
 } 
 
-## A function to calculate the new cases ##
-cal_case <- function(prob, scale){
-  new_case <-(prob[-1,5]- prob[-nrow(prob),5])*10^5
+## A function to calculate the number of new cases ##
+cal_case <- function(prob){
+  new_case <-(prob[-1,5]- prob[-nrow(prob),5])
   new_case[1] = 0
+
+  return(new_case)
+  
+
+}
+
+## A function to calculate case rate per 100,000 ##
+cal_caserate <- function(prob, scale){
+  new_case <- cal_case(prob)
+  case_rate <- new_case / prob[-1,1] * 10^5
+  
   if (scale %in% c('log','Log')){
-    new_case_log <- log(new_case)
-    new_case_log[is.infinite(new_case_log)] = 0
+    case_rate_log <- log(new_case)
+    case_rate_log[is.infinite(case_rate_log)] = 0
+    
     return(new_case_log)
   }else{
-    return(new_case)
-  }
-
+    return(case_rate)
+}
 }
 
 ## A function to calculate error ##
@@ -93,7 +102,7 @@ cal_cost <- function(m.beta, parameters, data, grouping, group){
     parameters$m.beta = m.beta
     # model outcome
     prob <- run_SIRS(parameters)
-    I.m <- cal_case(prob, 'log')
+    I.m <- cal_caserate(prob, 'natural')
     # observed case 
     temp <- data %>%
       filter(!!sym(grouping) == group) %>%
@@ -106,7 +115,7 @@ cal_cost <- function(m.beta, parameters, data, grouping, group){
         w.case_rate_log = ifelse(is.infinite(w.case_rate_log),0,w.case_rate_log)
       )
     
-    I.o <- temp$w.case_rate_log
+    I.o <- temp$w.case_rate
     #print(c(length(m.beta[m.beta<0]),length(I.m[is.na(I.m)]), length(I.o[is.na(I.o)])))
     
     # sum of squared errors
@@ -124,7 +133,7 @@ cal_cost <- function(m.beta, parameters, data, grouping, group){
 run_SIRS_clbr <- function(m.beta, parameters){
   parameters$m.beta = m.beta
   prob = run_SIRS(parameters)
-  I.m <- cal_case(prob,'natural')
+  I.m <- cal_caserate(prob,'natural')
   
   return(list(prob,I.m))
 }
@@ -149,6 +158,12 @@ covid_by_state2 <- covid_by_state %>%
     grp2 = ifelse(grp1 == 'S', 'S', 'N' )
   )
 
+test <- covid_by_state2 %>%
+  group_by(grp1, date) %>%
+  summarize(sum_case_sm = sum(cases_sm),
+            sum_pop = sum(pop2020)) %>%
+  filter(date == "2020-03-01")%>%
+  mutate(IC = sum_case_sm/sum_pop) 
 
 ############################
 ###### Calibration #########
@@ -159,8 +174,14 @@ T0 = 0.0
 Tend = length(levels(as.factor(covid_by_state2$date)))
 n_days = as.integer(Tend-T0)
 n_days_per_unit = 30.5
+# Initial state distribution
+IC = c(S=1-1000/7100000,I=1000/7100000,R=0,C=0) # Northeast
+#IC = c(S=1-0.00000000767,I=0.00000000767,R=0,C=0) # Northeast
+
+IC = c(S=1-1000/67000000,I=1000/67000000,R=0,C=0) # South
+#IC = c(S=1-1000/187000000,I=1000/187000000,R=0,C=0) # Midwestt
 # Fixed infection parameters
-beta0=0.185
+beta0=1#0.185
 gamma= 0.16
 z = 0.005
 
@@ -173,6 +194,7 @@ parameters = list(
                   Tend = Tend,
                   n_days = n_days,
                   n_days_per_unit = n_days_per_unit,
+                  IC = IC,
                   InfectionParam=c(beta0,gamma,z)
                   )
 
@@ -207,10 +229,10 @@ case_rate_grp1_W = run_SIRS_clbr(grp1_W_betas,parameters)[[2]]
 case_rate_grp1_MW = run_SIRS_clbr(grp1_MW_betas,parameters)[[2]]
 dt_grp1_m <- data.frame(
   date = dt_grp1_o$date,
-  MW = case_rate_grp1_MW,
-  NE = case_rate_grp1_NE,
-  S = case_rate_grp1_S,
-  W = case_rate_grp1_W
+  MW = case_rate_grp1_MW/100,
+  NE = case_rate_grp1_NE/100,
+  S = case_rate_grp1_S/100,
+  W = case_rate_grp1_W/100
 )
 dt_grp1_m_t <- melt(dt_grp1_m, id.vars="date")
 dt_grp1_m_t <- dt_grp1_m_t %>%
